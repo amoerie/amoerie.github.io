@@ -1,0 +1,45 @@
+baseURL = "https://amoerie.github.io/"
+languageCode = "en-us"
+title = "Coding out loud"
+theme = "PaperMod"
+
+[params]
+  description = "Expressing the strange rhythms in my head"
+  author = "Alexander Moerman"
+  defaultTheme = "auto"
+  ShowReadingTime = true
+  ShowPostNavLinks = true
+  ShowBreadCrumbs = true
+  ShowCodeCopyButtons = true
+  ShowShareButtons = false
+  comments = false
+
+  [params.homeInfoParams]
+    Title = "Coding out loud"
+    Content = "Expressing the strange rhythms in my head"
+
+  [[params.socialIcons]]
+    name = "github"
+    url = "https://github.com/amoerie"
+
+[menu]
+  [[menu.main]]
+    identifier = "posts"
+    name = "Posts"
+    url = "/posts/"
+    weight = 10
+  [[menu.main]]
+    identifier = "about"
+    name = "About"
+    url = "/about/"
+    weight = 20
+
+[outputs]
+  home = ["HTML", "RSS", "JSON"]
+
+[markup]
+  [markup.highlight]
+    style = "monokai"
+    lineNos = false
+    codeFences = true
+    guessSyntax = true

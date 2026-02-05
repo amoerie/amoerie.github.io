@@ -1,0 +1,15 @@
+# Hugo build output (built by GitHub Actions)
+public/
+
+# Hugo lock file
+.hugo_build.lock
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
