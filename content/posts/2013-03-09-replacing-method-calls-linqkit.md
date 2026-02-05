@@ -13,11 +13,17 @@ Does this sound familiar to you? It's a common issue that many developers face, 
 
 To understand why this happens, you must first realize that Linq To Entities - the thing that produces the SQL statements for you - never really executes your C# code. So when you write:
 
-https://gist.github.com/amoerie/5124034
+```csharp
+var filteredNames = people.Where(p => p.Name.Contains("a")).Select(p => p.Name);
+```
 
 there is never a point in time where the entire 'People' table is loaded from your database into memory, and then parsed in-memory. Rather, Linq to Entities will parse your expression by 'reading it' (and not executing it!) and produce equivalent SQL statements. The above C# code would roughly produce:
 
-https://gist.github.com/amoerie/5124038
+```sql
+select [Extent1].Name
+from [dbo].[People] [Extent1]
+where [Extent1].Name like '%a%'
+```
 
 This is a rather brilliant system, and a very performant one too, but as with any system it has its limitations. And that's what today's post is all about: you can't call methods in your LINQ statements if they need to be translated to valid SQL statements. One solution that you'll see come up often on stackoverflow is to just call 'ToList()' or 'AsEnumerable()', which loads the entities in memory and makes your SQL translation woes go away.
 
@@ -31,15 +37,100 @@ I'll walk you through it, and at the end you can *decide for yourself* wether th
 
 We want to be able to call a method inside a [Lambda Expression](http://msdn.microsoft.com/en-us/library/bb397687.aspx) and have it produce valid SQL statements. I've setup a little sample application where we want to manage our Products, where each Product has a Name. An important functional requirement is also that our application will support many languages, and we want our products to have different names per language. I've setup the models like this:
 
-https://gist.github.com/amoerie/5124060
+```csharp
+/// <summary>
+///     Interface for all classes that provide translations
+/// </summary>
+/// <typeparam name="TEntity"></typeparam>
+public interface ITranslation<TEntity> where TEntity: class
+{
+    string CultureName { get; set; }
+}
+
+/// <summary>
+///     Interface for all classes that have translatable properties
+/// </summary>
+/// <typeparam name="TEntity"></typeparam>
+/// <typeparam name="TTranslation"></typeparam>
+public interface ITranslatable<TEntity, TTranslation>
+    where TTranslation : class, ITranslation<TEntity> 
+    where TEntity : class
+{
+    ICollection<TTranslation> Translations { get; set; }
+}
+
+public class Product : ITranslatable<Product, ProductTranslation>
+{
+    /// <summary>
+    ///     Unique identifier
+    /// </summary>
+    public virtual int Id { get; set; }
+
+    /// <summary>
+    ///     1 to Many translations
+    /// </summary>
+    public virtual ICollection<ProductTranslation> Translations { get; set; }
+}
+
+public class ProductTranslation: ITranslation<Product>
+{
+    /// <summary>
+    ///     Unique identifier
+    /// </summary>
+    public virtual int Id { get; set; }
+
+    /// <summary>
+    ///     Implemented from <see cref="ITranslation{TEntity}"/>
+    /// </summary>
+    public string CultureName { get; set; }
+
+    /// <summary>
+    ///     Foreign key to Product. Entity Framework will pick up on
+    ///     this automatically
+    /// </summary>
+    public virtual int ProductId { get; set; }
+
+    /// <summary>
+    ///     Navigation property to Product.
+    /// </summary>
+    public virtual Product Product { get; set; }
+
+    /// <summary>
+    ///     Culture-specific name
+    /// </summary>
+    public virtual string Name { get; set; }
+}
+```
 
 Simply put, we have a Product class with many ProductTranslations. ITranslatable and ITranslation are interfaces that allow me to write extension methods for additional functionality should I need it later on, without imposing any inheritance constraints. For example, I have the following extension method for ITranslatable, which returns the appropriate ITranslation instance of an ITranslatable instance depending on the current default CultureInfo:
 
-https://gist.github.com/amoerie/5124085
+```csharp
+public static class ExtensionsForITranslatable
+{
+    /// <summary>
+    ///     Returns the current appropriate translation for this <paramref name="translatable"/>
+    /// </summary>
+    /// <typeparam name="TTranslatable">The translatable type</typeparam>
+    /// <typeparam name="TTranslation">The translation type</typeparam>
+    /// <param name="translatable">This instance of a translatable class</param>
+    /// <returns>The current appropriate translation for this <paramref name="translatable"/></returns>
+    public static TTranslation Current<TTranslatable, TTranslation>(
+            this ITranslatable<TTranslatable, TTranslation> translatable)
+        where TTranslation : class, ITranslation<TTranslatable>
+        where TTranslatable : class, ITranslatable<TTranslatable, TTranslation>
+    {
+        // Get current default UI culture info
+        string currentCultureName = CultureInfo.DefaultThreadCurrentUICulture.Name;
+        return translatable.Translations.SingleOrDefault(t => t.CultureName == currentCultureName);
+    }
+}
+```
 
 Now, I'd very much like to write C# code like this, which should produce valid SQL statements:
 
-https://gist.github.com/amoerie/5124090
+```csharp
+var filteredPeople = context.People.Where(p => p.Current().Name.Contains("a");
+```
 
 Unfortunately, Linq to Entities does not recognize the 'Current()' method and will fail to provide any meaningful SQL statements.
 
@@ -55,7 +146,10 @@ The first step to reaching our goal is using [LinqKit](http://www.albahari.com/n
 
 This is actually very similar to what we're trying to achieve: replacing the call to 'Current()' with a valid Expression tree at runtime. Let's write a preliminary version of what we want by using Linqkit:
 
-https://gist.github.com/amoerie/5124148
+```csharp
+Expression<Func<Person, bool>> current = p => p.Translations.FirstOrDefault(t => t.CultureName == "nl-BE");
+var filteredPeople = context.People.AsExpandable().Where(p => current.Invoke(p).Name.Contains("a"));
+```
 
 As you can see, we no longer need to write the code for 'current' each time anymore, which is great. However, in any real-world application you're probably composing LINQ queries all over the place and it would quickly become a pain to pass this variable around. What we really want is that a call to Current() would be replaced at runtime with the expression from the previous code snippet...
 
@@ -67,7 +161,13 @@ The idea is that we want to do what LinqKit is doing, dynamically expanding/inse
 
 The first thing we'll do is define an interface for a class that can replace expressions at runtime:
 
-https://gist.github.com/amoerie/5124165
+```csharp
+public interface IExpressionReplacer<in TExpression> where TExpression: Expression
+{
+    bool ShouldReplace(TExpression expression);
+    Expression GetReplacement(TExpression expression);
+}
+```
 
 Any class implementing this interface should:
 
@@ -76,14 +176,87 @@ Any class implementing this interface should:
 
 Let's create one for our 'Current()' method!
 
-https://gist.github.com/amoerie/5124184
+```csharp
+/// <summary>
+///     Dynamically replaces a MethodCallExpression for 'ExtensionsForITranslatable.Current()' to
+///     a valid equivalent expression
+/// </summary>
+public class ExpressionReplacerForExtensionsForITranslatableCurrent: IExpressionReplacer<MethodCallExpression>
+{
+    private readonly MethodInfo _methodInfoForCurrent;
+
+    public ExpressionReplacerForExtensionsForITranslatableCurrent()
+    {
+        _methodInfoForCurrent = typeof (ExtensionsForITranslatable)
+            .GetMethods().Single(m => m.Name == "Current"
+                                      && m.GetParameters().Count() == 1
+                                      && m.GetParameters().Single().ParameterType.GetGenericTypeDefinition() == typeof (ITranslatable<,>));
+    }
+
+    public bool ShouldReplace(MethodCallExpression expression)
+    {
+        return expression.Method.IsGenericMethod && expression.Method.GetGenericMethodDefinition() == _methodInfoForCurrent;
+    }
+
+    public Expression GetReplacement(MethodCallExpression expression)
+    {
+        // 'translatableObject.Current()' is equivalent to 'ExtensionsForITranslatable.Current(translatableObject)'
+        var translatableObject = expression.Arguments.First();
+        var translatableType = translatableObject.Type;
+        // Get ITranslatable<TEntity, TTranslation> interface declaration of translatableObject
+        var translatableInterface = translatableType
+            .GetInterfaces()
+            .Single(i => i.IsGenericType && typeof(ITranslatable<,>) == i.GetGenericTypeDefinition());
+        // Get TTranslation from ITranslatable<TEntity, TTranslation>
+        var translationType = translatableInterface
+            .GetGenericArguments()
+            .Single(t => t.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ITranslation<>)));
+        // Make dynamic call to MakeCurrentExpression
+        var makeExpressionMethod = typeof(ExpressionReplacerForExtensionsForITranslatableCurrent).GetMethod("MakeCurrentExpression");
+        var genericMakeExpressionMethod = makeExpressionMethod.MakeGenericMethod(new[] { translatableType, translationType });
+        var translationLambda = (LambdaExpression) genericMakeExpressionMethod.Invoke(this, new object[] { CultureInfo.DefaultThreadCurrentUICulture.Name });
+        return Expression.Invoke(translationLambda, translatableObject);
+    }
+
+    /// <summary>
+    ///     Returns the expression that should be inserted at the place where .Current() is called
+    /// </summary>
+    /// <typeparam name="TTranslatable"></typeparam>
+    /// <typeparam name="TTranslation"></typeparam>
+    /// <param name="cultureName"></param>
+    /// <returns></returns>
+    public LambdaExpression MakeCurrentExpression<TTranslatable, TTranslation>(string cultureName)
+        where TTranslatable : class, ITranslatable<TTranslatable, TTranslation>
+        where TTranslation : class, ITranslation<TTranslatable>
+    {
+        Expression<Func<TTranslatable, TTranslation>> translationOfCultureFunction =
+            translatable => translatable.Translations.FirstOrDefault(t => t.CultureName == cultureName);
+        return translationOfCultureFunction;
+    }
+}
+```
 
 Difficult? Yes. Maybe.
 We're essentially extracting some type information from the MethodCallExpression and using that to create a dynamic call to the MakeCurrentExpression method, which needs a TEntity and TTranslation type to function.
 
 We can now extend LinqKit's ExpressionExpander to inject our replacing rules:
 
-https://gist.github.com/amoerie/5124191
+```csharp
+class ReplacingExpressionsExpander: ExpressionExpander
+{
+    private static readonly IExpressionReplacer<MethodCallExpression>[] MethodCallReplacers
+        = new IExpressionReplacer<MethodCallExpression>[] {new ExpressionReplacerForExtensionsForITranslatableCurrent()};
+
+    protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
+    {
+        foreach (var replacer in MethodCallReplacers.Where(replacer => replacer.ShouldReplace(methodCallExpression)))
+        {
+            return Visit(replacer.GetReplacement(methodCallExpression));
+        }
+        return base.VisitMethodCall(methodCallExpression);
+    }
+}
+```
 
 Note that I've only added method overrides for VisitMethodCall. There are plenty of other overriding possibilities if you want to dynamically replace property accessors, etc. However, I found this blog post to be complex enough as it is already. :-)
 
@@ -91,17 +264,61 @@ Note that I've only added method overrides for VisitMethodCall. There are plenty
 
 The last thing to do now is to change the LinqKit AsExpandable methods so they return our custom expander instead of the default one:
 
-https://gist.github.com/amoerie/5124195
+```csharp
+public static class Extensions
+{
+  public static Expression<TDelegate> Expand<TDelegate> (this Expression<TDelegate> expr)
+  {
+    return (Expression<TDelegate>)new ReplacingExpressionsExpander().Visit(expr);
+  }
+  
+  public static Expression Expand (this Expression expr)
+  {
+    return new ReplacingExpressionsExpander ().Visit (expr);
+  }
+}
+```
 
 ### Step 4: Bask in glory
 
 Now, when we open the index page for products, for a culture "nl-BE" and filter by name contains "a", like so:
 
-https://gist.github.com/amoerie/5124090
+```csharp
+var filteredPeople = context.People.Where(p => p.Current().Name.Contains("a");
+```
 
 This produces the following SQL statements:
 
-https://gist.github.com/amoerie/5124210
+```sql
+exec sp_executesql N'SELECT 
+[Project2].[Id1] AS [Id], 
+[Project2].[Id] AS [Id1], 
+[Project2].[C1] AS [C1], 
+[Project2].[Id2] AS [Id2], 
+[Project2].[CultureName] AS [CultureName], 
+[Project2].[ProductId] AS [ProductId], 
+[Project2].[Name] AS [Name]
+FROM ( SELECT 
+  [Extent1].[Id] AS [Id], 
+	[Element1].[Id] AS [Id1], 
+	[Extent3].[Id] AS [Id2], 
+	[Extent3].[CultureName] AS [CultureName], 
+	[Extent3].[ProductId] AS [ProductId], 
+	[Extent3].[Name] AS [Name], 
+	CASE WHEN ([Extent3].[Id] IS NULL) THEN CAST(NULL AS int) ELSE 1 END AS [C1]
+	FROM   [dbo].[Products] AS [Extent1]
+	CROSS APPLY  (SELECT TOP (1) 
+		[Extent2].[Id] AS [Id], 
+		[Extent2].[CultureName] AS [CultureName], 
+		[Extent2].[ProductId] AS [ProductId], 
+		[Extent2].[Name] AS [Name]
+		FROM [dbo].[ProductTranslations] AS [Extent2]
+		WHERE ([Extent1].[Id] = [Extent2].[ProductId]) AND ([Extent2].[CultureName] = @p__linq__0) ) AS [Element1]
+	LEFT OUTER JOIN [dbo].[ProductTranslations] AS [Extent3] ON [Extent1].[Id] = [Extent3].[ProductId]
+	WHERE [Element1].[Name] LIKE N''%a%''
+)  AS [Project2]
+ORDER BY [Project2].[Id1] ASC, [Project2].[Id] ASC, [Project2].[C1] ASC',N'@p__linq__0 nvarchar(4000)',@p__linq__0=N'nl-BE'
+```
 
 ### Step 5: Use the source
 

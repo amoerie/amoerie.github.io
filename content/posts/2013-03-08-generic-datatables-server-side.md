@@ -49,32 +49,77 @@ Lastly, you can add a last column with custom html. The best way I've found to p
 
 The signature of the LastColumn() function is:
 
-https://gist.github.com/amoerie/5119920
+```csharp
+IHtmlString LastColumn(string lastColumnHeader, Func<TEntity, IHtmlString> lastColumnHtml);
+```
 
 Anyway, this is how the HtmlHelper works:
 
-https://gist.github.com/amoerie/5119865
+```csharp
+@(Html.Datatable<Person>("personDatatable")
+  	.Property("Id", person => person.Id)
+		.Property("Name", p => p.Name.ToLower())
+		.Property("Birthday", p => p.Birthday, "dd/MM/yyyy")
+		.Property("Address", p => p.Address.Street + " " + p.Address.HouseNumber)
+		.Property("Time", p => p.Time, @"hh\:mm\:ss")
+		.LastColumn("Actions", PersonButtons))
+		
+@helper PersonButtons(Person person) {
+	<a href="@Url.Action("PersonForm", new { id = person.Id})" class="btn btn-primary btn-edit">Edit</a>
+	<a href="@person.Id" class="btn btn-danger">Delete</a>
+}
+```
 
 ### Step 2: The model binder
 
 Just like most other attempts at making a generic server-side wrapper for datatables, I've provided a C# class to map the incoming ajax requests and a model binder that does the heavy lifting for you.
 All you need to do is register the model binder, put the following somewhere in Global.asax (or better, in a separate ModelBindersConfig in the App Start folder):
 
-https://gist.github.com/amoerie/5119912
+```csharp
+ModelBinders.Binders.Add(typeof(DatatableParam), new DatatableParamConverter());
+```
 
 ### Step 3: The Controller
 
 The idea of server-side processing with a datatable is that your MVC Controller accepts the incoming ajax requests, parses it, fetches the data from somewhere and applies the filtering, sorting, etc. specified in the request object.
 However, because the library does most of the heavy work, you only have to glue some specific stuff together. In the PeopleController:
 
-https://gist.github.com/amoerie/5119894
+```csharp
+public JsonResult Datatable(DatatableParam param)
+{
+    var people = context.People.Include(p => p.Address); // fetch the data from somewhere
+    var sessionObject = Session.GetDatatableProperties<Person>(param.DatatableId); // use a custom extension method on the Session object to get the relevant session object
+    var parser = new DatatableParser<Person>(people, sessionObject); // make a parser and pass it the data and session object
+    return parser.Parse(param).ToJson(); // have the parser parse the request parameters and return the Json Result
+}
+```
 
 ### Step 4: The Javascript
 
 Somewhere along the way I considered generating the necessary javascript with the HtmlHelper as well. I wanted to keep full control of the javascript though, so in the end I decided against it.
 This means you need to write the following javascript to get the datatable to actually do something:
 
-https://gist.github.com/amoerie/5119908
+```javascript
+$("#personDatatable").dataTable({
+  bProcessing: true,
+  bServerSide: true,
+  sAjaxSource: "People/Datatable", // this links to your controller method from Step 3
+  fnServerParams: function (aoData) {
+  aoData.push({ name: "datatableId", value: "personDatatable" }); // add the name of the datatable to the ajax request. This should be equal to the unique name you gave it in Step 1
+  },
+  aoColumns: [ // You can configure, per property, if it should be sortable, etc. Make sure the names equal the names you gave it in step 1.
+    { mDataProp: 'Id' },
+    { mDataProp: 'Name' },
+    { mDataProp: 'Birthday' },
+    { mDataProp: 'Address' },
+    { mDataProp: 'Time' },
+    { mDataProp: 'Actions', bSearchable: false, bSortable: false }
+  ],
+  fnDrawCallback: function () {
+    bindButton($(".btn-edit"));
+  }
+});
+```
 
 ### That's it!
 

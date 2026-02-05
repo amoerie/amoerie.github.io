@@ -22,6 +22,10 @@ theme = "PaperMod"
     name = "github"
     url = "https://github.com/amoerie"
 
+  [[params.socialIcons]]
+    name = "bluesky"
+    url = "https://bsky.app/profile/amoerie.bsky.social"
+
 [menu]
   [[menu.main]]
     identifier = "posts"
